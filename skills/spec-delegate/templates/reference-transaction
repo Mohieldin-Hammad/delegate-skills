@@ -1,0 +1,22 @@
+#!/bin/sh
+# spec-delegate:reference-transaction
+#
+# Refuses every ref change (commit, stash, reset, merge, rebase, branch, tag,
+# fetch, checkout -b) while DELEGATE_WORKER is set. spec-delegate sets it for
+# implementers. `--no-verify` does not skip this hook. Without the variable the
+# hook does nothing, so your own git use is never affected.
+#
+# It guards history, not files. Commands that discard working-tree changes
+# without moving a ref (`git checkout -- <file>`, `git restore`, `git clean`,
+# and the file half of `git reset --hard`) still run. Inside an implementer's
+# worktree they can only reach that implementer's own uncommitted work.
+
+[ -n "$DELEGATE_WORKER" ] || exit 0
+[ "$1" = "prepared" ] || exit 0
+
+echo "spec-delegate: implementers may not change git refs. Refused:" >&2
+while read -r _old _new ref; do
+  echo "  $ref" >&2
+done
+echo "Leave your changes in the working tree. The orchestrator reviews and lands them." >&2
+exit 1

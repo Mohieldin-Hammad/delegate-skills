@@ -1,0 +1,30 @@
+{
+  "version": "spec-delegate.v1",
+  "worktreeRoot": "../my-project-wt",
+  "setup": [
+    "uv sync --frozen"
+  ],
+  "gates": [
+    "uv run pytest -q",
+    "uv run ruff check ."
+  ],
+  "snapshot": [
+    ".spec-workflow/specs",
+    ".spec-workflow/steering"
+  ],
+  "protected": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".gitignore",
+    ".githooks/",
+    ".delegate/",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "relayFlags": {
+    "agy": [
+      "--sandbox",
+      "--dangerously-skip-permissions"
+    ]
+  }
+}
