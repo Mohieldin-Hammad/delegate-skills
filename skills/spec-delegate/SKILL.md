@@ -96,6 +96,8 @@ because the user approved them for this project. Run it in the background (in Cl
 Keep this cheap: read the result before the code, and the code only where it matters.
 
 1. Read `result.json`: `status`, `touchedFiles`, and the short report at the end of `finalMessage`.
+   A failed run is not a review: classify it as in "When a lane is out of quota or gone" in
+   [references/choosing-a-lane.md](references/choosing-a-lane.md), and pick again.
 2. Run the guard check, with `--allow` for every file or folder the brief allowed:
 
    ```bash

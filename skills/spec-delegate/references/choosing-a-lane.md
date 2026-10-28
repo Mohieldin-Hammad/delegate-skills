@@ -37,7 +37,9 @@ node "<skill-dir>/scripts/ladder.mjs" pick --score <n>
 ```
 
 It returns the starting lane, its implementer and model. When a score has several candidates, it
-picks the one whose quota pool saw the fewest runs in the last five hours.
+picks the available one whose quota pool saw the fewest runs in the last five hours. When none is
+available it climbs to the next available lane up (`fallback: true`); see "When a lane is out of
+quota or gone" below. Pass its `warnings` on to the user.
 
 **Calibrate first.** Run `ladder.mjs stats`. If the starting lane has at least 4 runs at this score
 and accepts fewer than half, start one rung up with `pick --after <lane>`. If a lane keeps passing
@@ -59,8 +61,37 @@ implementer reports it is blocked on difficulty, or the check shows it went off 
 
 At the top of the ladder (`lane: null`), keep the task yourself or ask the user.
 
-**Do not escalate for a broken run.** Quota, auth, timeouts and crashes say nothing about difficulty.
-Record `failed`, then try another candidate for the same score on a different pool, or wait.
+**Do not escalate for a broken run.** Quota, a missing model, auth, timeouts and crashes say
+nothing about difficulty. Handle them as below instead.
+
+## When a lane is out of quota or gone
+
+When a run fails, read `stderrTail` and `finalMessage` in `result.json` and classify it:
+
+| What the error says | Record | Effect |
+| --- | --- | --- |
+| Quota, usage or rate limit, 429, "exhausted" | `limited`, with `--until` when the error gives a reset time | The lane's whole **pool** is skipped until then. Without `--until`, the pool's `cooldown` from the ladder applies (default 5h). |
+| Unknown, invalid or retired model | `unavailable` | That implementer **and model** are skipped until the lane's model changes or someone runs `clear`. Tell the user and suggest removing the lane or replacing its model with `delegate-setup`; the choice is theirs. |
+| Auth, timeout, crash, anything else | `failed` | Nothing is skipped. Fix the cause (e.g. ask the user to log in) or retry once. |
+
+Then start the task again in a fresh worktree (`remove --force`, `create`) with a new `pick --score`.
+It now skips the blocked lanes and returns another candidate, or climbs.
+
+**Never step down on your own.** When `pick` returns `lane: null`, everything at this score and above
+is blocked. Tell the user the `earliestReset` and let them choose: wait, use a weaker lane (name
+it), or have you write it yourself.
+
+`ladder.mjs status` shows every lane as `ok`, `limited` (with the reset time), `unavailable` or
+`stale` (named by the ladder but missing from the fleet), and warns about fleet lanes the ladder
+never uses. Check it before a batch. `ladder.mjs clear --lane <lane>` lifts a limit or an
+unavailable mark early, for instance when the user says the quota has reset or the model is back.
+
+**Removing a lane on purpose:** remove it with `delegate-setup`, then take it out of the ladder's
+`start`, `escalate`, `pools` and `cooldown`. A lane you miss only causes a warning; `pick` skips it.
+
+**Cursor:** depending on the user's Cursor settings, running out of included usage either stops
+requests or switches to paid on-demand usage. In the second case no error ever appears. Mention
+this once when setting up a Cursor lane.
 
 ## Record every attempt
 
@@ -75,7 +106,12 @@ node "<skill-dir>/scripts/ladder.mjs" record --project <repo name> --task <spec>
 | `declined` | The user declined it. |
 | `escalated` | You moved the task to a stronger lane. |
 | `blocked` | The implementer stopped and reported a blocker. |
-| `failed` | The run broke: quota, auth, timeout or crash. |
+| `limited` | The run hit a quota or rate limit. |
+| `unavailable` | The model is unknown, invalid or retired. |
+| `failed` | The run broke for another reason: auth, timeout, crash. |
+
+`stats` counts only the first four for acceptance; the last three appear as `broken`. Recent-run
+balancing counts only runs that reached a working model.
 
 The record lives in the user's state directory, never in a project.
 
@@ -89,7 +125,9 @@ When the user says "delegate all the tasks" (or a range of them):
    approval for it. That approves the plan, not any commit.
 2. **Order.** A task starts only after the tasks it depends on have landed, so its worktree starts
    from their code. Independent tasks may run in parallel, at most two at a time, on different
-   quota pools.
+   quota pools. Run `ladder.mjs status` first, and again whenever a run comes back `limited`.
+   A task whose lanes are all blocked **pauses**. Keep the others moving, and list paused tasks with
+   their `earliestReset` in the summary.
 3. **Review each one as it finishes**, using the normal loop, and keep independent work moving while
    the user decides.
 4. **Landing still needs the user's accept for every task.** Land without asking only if the user

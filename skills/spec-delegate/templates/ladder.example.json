@@ -1,16 +1,51 @@
 {
   "version": "spec-delegate-ladder.v1",
   "start": {
-    "1": ["cheap", "tests"],
-    "2": ["oss", "cheap"],
-    "3": ["impl", "oss"],
-    "4": ["gpt", "impl"],
-    "5": ["hard"]
+    "1": [
+      "cheap",
+      "tests"
+    ],
+    "2": [
+      "oss",
+      "cheap"
+    ],
+    "3": [
+      "impl",
+      "oss"
+    ],
+    "4": [
+      "gpt",
+      "impl"
+    ],
+    "5": [
+      "hard"
+    ]
   },
-  "escalate": ["cheap", "tests", "oss", "impl", "gpt", "hard"],
+  "escalate": [
+    "cheap",
+    "tests",
+    "oss",
+    "impl",
+    "gpt",
+    "hard"
+  ],
   "pools": {
-    "cursor": ["cheap", "impl", "gpt"],
-    "agy-gemini": ["tests", "hard"],
-    "agy-third-party": ["oss"]
+    "cursor": [
+      "cheap",
+      "impl",
+      "gpt"
+    ],
+    "agy-gemini": [
+      "tests",
+      "hard"
+    ],
+    "agy-third-party": [
+      "oss"
+    ]
+  },
+  "cooldown": {
+    "cursor": "24h",
+    "agy-gemini": "5h",
+    "agy-third-party": "5h"
   }
 }

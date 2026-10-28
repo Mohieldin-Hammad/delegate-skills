@@ -13,7 +13,9 @@ what you plan to write and get a yes before writing anything.
    Global lanes do not.
 3. **The ladder.** `~/.config/delegate-skills/ladder.json` (or under `$XDG_CONFIG_HOME`) maps each
    complexity score to starting lanes, lists lanes weakest first for escalation, and groups lanes by
-   the quota pool they draw on. Copy `templates/ladder.example.json` and use the user's lane names.
+   the quota pool they draw on. `cooldown` sets how long a pool rests after hitting its limit when the
+   error gives no reset time (default 5h). Copy `templates/ladder.example.json` and use the user's
+   lane names.
    Lanes from different pools (different CLIs, or a CLI's separate model quotas) on the same score let
    `ladder.mjs` spread the load.
 4. **The spec-workflow MCP**, connected to the orchestrator at user scope, so every project has it.
