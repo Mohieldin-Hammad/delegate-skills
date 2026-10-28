@@ -52,8 +52,10 @@ task the user named, or the next `[ ]` one. Keep these for yourself instead of d
 add dependencies or need the user's approval to run something, tasks that must change protected files
 (see the config), and design or spec work.
 
-Choose a **lane** from the fleet (`node <delegate-setup-dir>/scripts/config.mjs load --cwd <repo>`)
-that fits the work, and the `*-delegate` skill of that lane's implementer.
+Score the task's complexity (1–5) and pick its lane with
+[references/choosing-a-lane.md](references/choosing-a-lane.md):
+`node "<skill-dir>/scripts/ladder.mjs" pick --score <n>`. Use the `*-delegate` skill of the lane's
+implementer.
 
 ### 2. Start it
 
@@ -110,7 +112,9 @@ Keep this cheap: read the result before the code, and the code only where it mat
 If something needs changing, write a short delta brief (only what is wrong, and the expected
 result) and resume the same conversation through the relay's resume option. Prefer the explicit id
 from `result.json` (e.g. `--conversation <id>`, `--session <id>`) over `--resume-last`. Allow two
-rounds. After that, fix it yourself or ask the user.
+rounds. After that, climb the ladder as described in
+[references/choosing-a-lane.md](references/choosing-a-lane.md). At the top, keep the task yourself
+or ask the user.
 
 ### 7. The user decides
 
@@ -132,6 +136,15 @@ Nothing lands without an explicit accept.
 
 **Decline:** `worktree.mjs remove --task <task> --force`, and set the task back to `[ ]`.
 
+Either way, record the attempt with `ladder.mjs record` so the next pick is better informed.
+
+## Delegating a whole spec
+
+When the user asks to delegate all tasks (or a range), plan the batch once, get one approval for the
+plan, then run the loop per task in dependency order. Every task still needs its own accept to land,
+unless the user says otherwise for that batch. See "Delegating a whole spec" in
+[references/choosing-a-lane.md](references/choosing-a-lane.md).
+
 ## What stays with the orchestrator
 
 The implementer never marks tasks, never writes implementation logs and never commits. Logging after
@@ -143,4 +156,6 @@ as files from the snapshot.
 
 - [references/setup.md](references/setup.md) — set up a new project, and the one-time machine setup.
 - [references/brief.md](references/brief.md) — the brief template.
+- [references/choosing-a-lane.md](references/choosing-a-lane.md) — complexity scores, the ladder,
+  escalation, the outcome record and batches.
 - The `*-delegate` skill of each implementer — relay flags, `result.json`, resume, permissions.

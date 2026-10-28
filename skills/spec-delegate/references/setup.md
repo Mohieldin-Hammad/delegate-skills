@@ -11,8 +11,13 @@ what you plan to write and get a yes before writing anything.
 2. **Fleet lanes, global.** Run `delegate-setup` and write the lanes with `--scope global`. Project
    lanes are approved per worktree, so they fail closed in every fresh worktree spec-delegate makes.
    Global lanes do not.
-3. **The spec-workflow MCP**, connected to the orchestrator at user scope, so every project has it.
-4. **Tell the orchestrator.** A line in its user-level instructions (for Claude Code,
+3. **The ladder.** `~/.config/delegate-skills/ladder.json` (or under `$XDG_CONFIG_HOME`) maps each
+   complexity score to starting lanes, lists lanes weakest first for escalation, and groups lanes by
+   the quota pool they draw on. Copy `templates/ladder.example.json` and use the user's lane names.
+   Lanes from different pools (different CLIs, or a CLI's separate model quotas) on the same score let
+   `ladder.mjs` spread the load.
+4. **The spec-workflow MCP**, connected to the orchestrator at user scope, so every project has it.
+5. **Tell the orchestrator.** A line in its user-level instructions (for Claude Code,
    `~/.claude/CLAUDE.md`) such as: "In projects with `.delegate/spec-delegate.json`, implement
    spec-workflow tasks through the spec-delegate skill; keep design and review yourself."
 
