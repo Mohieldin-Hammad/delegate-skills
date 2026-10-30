@@ -12,7 +12,7 @@ description: >-
 license: MIT
 compatibility: Requires git, Node.js 18+, a spec-workflow MCP server connected to the orchestrator, and at least one installed and authenticated `*-delegate` implementer skill. Shell examples assume bash/zsh.
 metadata:
-  version: 0.2.0
+  version: 0.5.0
 ---
 
 # Spec Delegate

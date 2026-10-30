@@ -2,8 +2,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Utility skills: not *-delegate, no relay.mjs / four-reference contract. */
-const UTILITY_SKILLS = ["delegate-setup", "codex-background"];
+/** Utility skills: no relay.mjs / four-reference contract, even when named *-delegate. */
+const UTILITY_SKILLS = ["delegate-setup", "codex-background", "spec-delegate"];
 
 function metadataVersion(source) {
   const lines = source.split(/\r?\n/);
@@ -23,7 +23,9 @@ function metadataVersion(source) {
 
 export function runPackageShape(h) {
   const skillsDir = join(h.testDir, "..", "skills");
-  const onDiskDelegate = readdirSync(skillsDir).filter((d) => d.endsWith("-delegate")).sort();
+  const onDiskDelegate = readdirSync(skillsDir)
+    .filter((d) => d.endsWith("-delegate") && !UTILITY_SKILLS.includes(d))
+    .sort();
   const onDiskUtility = readdirSync(skillsDir).filter((d) => UTILITY_SKILLS.includes(d)).sort();
   const registered = new Set(
     JSON.parse(readFileSync(join(h.testDir, "..", "skills.sh.json"), "utf8"))

@@ -38,6 +38,13 @@
       "skills": [
         "codex-background"
       ]
+    },
+    {
+      "title": "Spec workflow",
+      "description": "Implement spec-workflow tasks through delegated implementers in guarded worktrees, then review and land them.",
+      "skills": [
+        "spec-delegate"
+      ]
     }
   ]
 }
