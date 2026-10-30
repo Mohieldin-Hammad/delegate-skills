@@ -3,21 +3,25 @@
  * worktree.mjs — isolated worktrees and guardrails for spec-delegate.
  *
  * Usage:
- *   node worktree.mjs install-hook [--cd <dir>]
  *   node worktree.mjs create --task <id> [--cd <dir>] [--base <ref>] [--no-setup]
  *   node worktree.mjs check  --task <id> [--cd <dir>] [--allow <path>]...
+ *   node worktree.mjs commit --task <id> --message <text> [--cd <dir>]
+ *   node worktree.mjs rebase --task <id> --onto <ref> [--cd <dir>]
  *   node worktree.mjs remove --task <id> [--cd <dir>] [--force]
  *   node worktree.mjs list   [--cd <dir>]
  *   node worktree.mjs --help
  *
  * Each implementer works in its own worktree on branch `delegate/<id>`, so the
  * user's working tree and its gitignored files (databases, `.env`, local
- * config) are out of reach. The reference-transaction hook refuses every ref
- * change while DELEGATE_WORKER is set, so the implementer cannot commit,
- * stash, reset or switch branches. `check` is the backstop: it compares the
- * worktree with the state recorded by `create`.
+ * config) are out of reach. Each worktree's own git config points
+ * core.hooksPath at a reference-transaction hook in the shared git dir that
+ * refuses every ref change, so the implementer cannot commit, stash, reset or
+ * switch branches. The orchestrator lands with `commit` and `rebase`, which
+ * use the project's own hooks instead. `check` is the backstop: it compares
+ * the worktree with the state recorded by `create`. Nothing in the project's
+ * tracked files or the main checkout's git config changes.
  *
- * Settings come from `<repo>/.delegate/spec-delegate.json` (all optional).
+ * Settings come from `<repo>/.spec-workflow/delegate.json` (all optional).
  * Prints JSON on stdout. Exit codes: 0 ok, 1 a check or setup command failed,
  * 2 usage or git error. Node built-ins only.
  */
@@ -35,13 +39,14 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 export const CONFIG_VERSION = "spec-delegate.v1";
 const STATE_VERSION = "spec-delegate-worktree.v1";
-export const CONFIG_PATH = join(".delegate", "spec-delegate.json");
+export const SPEC_DIR = ".spec-workflow";
+export const CONFIG_PATH = join(SPEC_DIR, "delegate.json");
 const CONFIG_KEYS = new Set([
   "version",
   "worktreeRoot",
@@ -52,26 +57,29 @@ const CONFIG_KEYS = new Set([
   "relayFlags",
 ]);
 const HOOK_NAME = "reference-transaction";
-const HOOK_MARKER = "spec-delegate:reference-transaction";
 const HOOK_TEMPLATE = fileURLToPath(new URL(`../templates/${HOOK_NAME}`, import.meta.url));
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 const HELP = `worktree.mjs — isolated worktrees and guardrails for spec-delegate
 
 Usage:
-  node worktree.mjs install-hook [--cd <dir>]
   node worktree.mjs create --task <id> [--cd <dir>] [--base <ref>] [--no-setup]
   node worktree.mjs check  --task <id> [--cd <dir>] [--allow <path>]...
+  node worktree.mjs commit --task <id> --message <text> [--cd <dir>]
+  node worktree.mjs rebase --task <id> --onto <ref> [--cd <dir>]
   node worktree.mjs remove --task <id> [--cd <dir>] [--force]
   node worktree.mjs list   [--cd <dir>]
 
 Commands:
-  install-hook  Install the hook that refuses ref changes by implementers.
-  create        Make worktree <worktreeRoot>/<id> on branch delegate/<id>, copy
-                the snapshot paths into it, and run the setup commands.
-  check         Confirm HEAD and the branch did not move, and list changed files.
-                --allow limits the files the task may change (repeatable; a
-                trailing / matches a directory).
+  create        Make worktree <worktreeRoot>/<id> on branch delegate/<id>, point
+                its hooks at the guard that refuses ref changes, copy the
+                snapshot paths into it, and run the setup commands.
+  check         Confirm HEAD, the branch and the guard did not change, and list
+                changed files. --allow limits the files the task may change
+                (repeatable; a trailing / matches a directory).
+  commit        Stage everything in the worktree and commit it, running the
+                project's own hooks instead of the guard.
+  rebase        Rebase the worktree's branch onto <ref>, the same way.
   remove        Delete the worktree and its branch. Refuses when the branch has
                 commits that are not in HEAD, unless --force.
   list          Show worktrees made by this script.
@@ -125,6 +133,16 @@ export function repoRoot(cwd) {
 
 export function commonDir(root) {
   return git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+}
+
+/** spec-delegate works from spec-workflow specs; without them there is nothing to delegate. */
+export function requireSpecWorkflow(root) {
+  if (!existsSync(join(root, SPEC_DIR))) {
+    throw new Error(
+      `no ${SPEC_DIR}/ in ${root}. spec-delegate implements spec-workflow tasks: create a spec ` +
+        "with the spec-workflow MCP first, or use a plain *-delegate skill for one-off work",
+    );
+  }
 }
 
 function statePath(root, task) {
@@ -198,41 +216,37 @@ export function hookFile(cwd) {
   return join(dir, HOOK_NAME);
 }
 
-export function hookInstalled(cwd) {
-  const file = hookFile(cwd);
-  if (!existsSync(file)) return { file, installed: false };
-  const ours = readFileSync(file, "utf8").includes(HOOK_MARKER);
-  const executable = (statSync(file).mode & 0o111) !== 0;
-  return { file, installed: ours && executable };
+export function guardDir(root) {
+  return join(commonDir(root), "spec-delegate", "hooks");
 }
 
-export function installHook(root) {
-  refuseImplementer("install-hook");
+/**
+ * Writes the guard into the shared git dir and turns on per-worktree config,
+ * so each delegate worktree can point its own core.hooksPath at the guard
+ * while the main checkout keeps its hooks.
+ */
+export function ensureGuard(root) {
+  const dir = guardDir(root);
+  const file = join(dir, HOOK_NAME);
   const template = readFileSync(HOOK_TEMPLATE, "utf8");
-  const file = hookFile(root);
-  const current = existsSync(file) ? readFileSync(file, "utf8") : null;
-  if (current != null && !current.includes(HOOK_MARKER)) {
-    throw new Error(`${file} already exists and was not written by spec-delegate; merge it by hand`);
-  }
-  mkdirSync(dirname(file), { recursive: true });
-  if (current !== template) writeFileSync(file, template);
+  mkdirSync(dir, { recursive: true });
+  if (!existsSync(file) || readFileSync(file, "utf8") !== template) writeFileSync(file, template);
   chmodSync(file, 0o755);
-
-  // A hooks directory under the shared git dir (the default) or outside the
-  // repository covers every worktree at once. One inside the working tree
-  // (core.hooksPath = .githooks) is per worktree: new worktrees get the hook
-  // only from a commit, and never when the directory is gitignored.
-  const rel = relative(root, file);
-  const inWorkingTree =
-    !rel.startsWith("..") && !isAbsolute(rel) && !file.startsWith(commonDir(root) + sep);
-  let reachesWorktrees = "now";
-  if (inWorkingTree) {
-    const ignored = gitRaw(root, ["check-ignore", "-q", "--", rel]).status === 0;
-    const committed = gitRaw(root, ["diff", "--quiet", "HEAD", "--", rel]).status === 0 &&
-      gitOptional(root, ["ls-files", "--", rel]) !== "";
-    reachesWorktrees = ignored ? "never" : committed ? "now" : "after-commit";
+  if (gitOptional(root, ["config", "--local", "--type=bool", "extensions.worktreeConfig"]) !== "true") {
+    // With per-worktree config on, these would apply to every worktree; git
+    // asks for them to move into the main worktree's config first.
+    if (gitOptional(root, ["config", "--local", "--type=bool", "core.bare"]) === "true" ||
+        gitOptional(root, ["config", "--local", "core.worktree"])) {
+      throw new Error("core.bare or core.worktree is set in .git/config; move it to config.worktree first");
+    }
+    git(root, ["config", "--local", "extensions.worktreeConfig", "true"]);
   }
-  return { ok: reachesWorktrees !== "never", file, changed: current !== template, reachesWorktrees };
+  return dir;
+}
+
+/** The hooks directory the project itself uses, for landing commits. */
+function projectHooksPath(root) {
+  return gitOptional(root, ["config", "core.hooksPath"]) || join(commonDir(root), "hooks");
 }
 
 export function copySnapshot(root, worktree, paths) {
@@ -284,6 +298,7 @@ export function dropWorktree(root, path, branch) {
 export function create(root, { task, base, setup = true }) {
   refuseImplementer("create");
   checkTask(task);
+  requireSpecWorkflow(root);
   const config = loadConfig(root);
   const branch = `delegate/${task}`;
   const path = join(config.worktreeRoot, task);
@@ -297,16 +312,14 @@ export function create(root, { task, base, setup = true }) {
   if (!baseSha) throw new Error(`cannot resolve --base ${base ?? "HEAD"}`);
   const baseRef = base ?? (gitOptional(root, ["symbolic-ref", "--short", "-q", "HEAD"]) || baseSha);
 
+  const guard = ensureGuard(root);
   mkdirSync(config.worktreeRoot, { recursive: true });
   git(root, ["worktree", "add", "--quiet", "-b", branch, path, baseSha]);
   let snapshot;
   try {
-    const hook = hookInstalled(path);
-    if (!hook.installed) {
-      throw new Error(
-        `the ${HOOK_NAME} hook is missing in the new worktree (${hook.file}). ` +
-          "Run `worktree.mjs install-hook`, and commit it if your hooks directory is tracked",
-      );
+    git(path, ["config", "--worktree", "core.hooksPath", guard]);
+    if (hookFile(path) !== join(guard, HOOK_NAME)) {
+      throw new Error(`the new worktree does not use the guard in ${guard}`);
     }
     snapshot = copySnapshot(root, path, config.snapshot);
   } catch (err) {
@@ -366,11 +379,13 @@ export function check(root, { task, allow = [] }) {
   const changed = changedFiles(state.path);
   const outsideAllow = allow.length ? changed.filter((f) => !matchesAny(f, allow)) : [];
   const protectedHits = changed.filter((f) => matchesAny(f, config.protected));
+  const hooks = gitOptional(state.path, ["config", "--worktree", "core.hooksPath"]);
 
   const problems = [];
   if (head !== state.base) problems.push(`HEAD moved from ${state.base.slice(0, 12)} to ${head.slice(0, 12)}`);
   if (onBranch !== state.branch) problems.push(`worktree is on ${onBranch || "a detached HEAD"}, not ${state.branch}`);
   if (tip !== state.base) problems.push(`branch ${state.branch} ${tip ? "moved" : "was deleted"}`);
+  if (hooks !== guardDir(root)) problems.push("the worktree no longer points core.hooksPath at the guard");
   if (outsideAllow.length) problems.push(`changed files outside --allow: ${outsideAllow.join(", ")}`);
   if (protectedHits.length) problems.push(`changed protected files: ${protectedHits.join(", ")}`);
   return {
@@ -382,6 +397,36 @@ export function check(root, { task, allow = [] }) {
     changed,
     empty: changed.length === 0,
   };
+}
+
+/** Runs git in a task's worktree with the project's own hooks instead of the guard. */
+function landGit(root, task, args) {
+  const state = readState(root, task);
+  if (!existsSync(state.path)) throw new Error(`worktree ${state.path} is gone`);
+  // Hook and git output go to stderr so stdout stays one JSON document.
+  const r = spawnSync("git", ["-C", state.path, "-c", `core.hooksPath=${projectHooksPath(root)}`, ...args], {
+    stdio: ["ignore", 2, 2],
+  });
+  return { state, status: r.status ?? 1 };
+}
+
+export function commit(root, { task, message }) {
+  refuseImplementer("commit");
+  checkTask(task);
+  if (!message) throw new Error("commit needs --message");
+  const add = landGit(root, task, ["add", "-A"]);
+  const { state, status } = add.status === 0 ? landGit(root, task, ["commit", "-q", "-m", message]) : add;
+  const head = gitOptional(state.path, ["rev-parse", "HEAD"]);
+  return { ok: status === 0, task, branch: state.branch, head };
+}
+
+export function rebase(root, { task, onto }) {
+  refuseImplementer("rebase");
+  checkTask(task);
+  if (!onto) throw new Error("rebase needs --onto");
+  const { state, status } = landGit(root, task, ["rebase", "-q", onto]);
+  const head = gitOptional(state.path, ["rev-parse", "HEAD"]);
+  return { ok: status === 0, task, branch: state.branch, onto, head };
 }
 
 export function remove(root, { task, force = false }) {
@@ -423,6 +468,8 @@ function main(argv) {
         task: { type: "string" },
         base: { type: "string" },
         allow: { type: "string", multiple: true },
+        message: { type: "string" },
+        onto: { type: "string" },
         "no-setup": { type: "boolean" },
         force: { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -442,14 +489,17 @@ function main(argv) {
   try {
     const root = repoRoot(resolve(values.cd ?? "."));
     switch (positionals[0]) {
-      case "install-hook":
-        result = installHook(root);
-        break;
       case "create":
         result = create(root, { task: values.task, base: values.base, setup: !values["no-setup"] });
         break;
       case "check":
         result = check(root, { task: values.task, allow: values.allow ?? [] });
+        break;
+      case "commit":
+        result = commit(root, { task: values.task, message: values.message });
+        break;
+      case "rebase":
+        result = rebase(root, { task: values.task, onto: values.onto });
         break;
       case "remove":
         result = remove(root, { task: values.task, force: values.force });

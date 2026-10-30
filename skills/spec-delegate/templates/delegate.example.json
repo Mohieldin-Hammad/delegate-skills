@@ -16,14 +16,12 @@
     "AGENTS.md",
     "CLAUDE.md",
     ".gitignore",
-    ".githooks/",
-    ".delegate/",
+    ".mcp.json",
     "pyproject.toml",
     "uv.lock"
   ],
   "relayFlags": {
     "agy": [
-      "--sandbox",
       "--dangerously-skip-permissions"
     ]
   }

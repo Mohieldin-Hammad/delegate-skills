@@ -40,7 +40,7 @@ You are an implementer. An orchestrator reviews your work, and the user decides 
 
 ## Rules
 
-<the "Rules for delegated implementers" section from the project's AGENTS.md>
+<the contents of templates/implementer-rules.md, as written>
 
 ## Report
 

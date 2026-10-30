@@ -6,12 +6,13 @@ description: >-
   isolated git worktree, review the result, and land it only after the user accepts. Use this whenever
   the user says "delegate task 3.2", "have an implementer do the next task", "run the next spec task
   through Cursor/Antigravity", "implement this spec with delegation", or asks to set up spec delegation
-  in a project ("set up spec-delegate here"). DO NOT USE for design or spec-writing work, for tasks
-  that install dependencies, or when the user wants you to write the code yourself.
+  in a project ("set up spec-delegate here"). DO NOT USE in projects without a `.spec-workflow/`
+  folder (use a plain `*-delegate` skill there), for design or spec-writing work, for tasks that
+  install dependencies, or when the user wants you to write the code yourself.
 license: MIT
 compatibility: Requires git, Node.js 18+, a spec-workflow MCP server connected to the orchestrator, and at least one installed and authenticated `*-delegate` implementer skill. Shell examples assume bash/zsh.
 metadata:
-  version: 0.1.0
+  version: 0.2.0
 ---
 
 # Spec Delegate
@@ -21,18 +22,31 @@ skill's relay sends a **brief** to an **implementer** CLI that does the typing. 
 which task goes out, what the brief says, whether the work is right, and you **land** it only after
 the user accepts.
 
+The workflow is private to the user. A project that uses spec-delegate tracks nothing about it
+except a `.spec-workflow/` line in `.gitignore`. The config lives in `.spec-workflow/delegate.json`,
+and everything else lives in the git dir (`.git/spec-delegate/`). Never add delegation files, rules
+or hooks to the project's tracked files.
+
 Three guardrails make this safe to run against real projects. Never skip them:
 
 1. **Worktree isolation.** Each task runs in its own worktree on branch `delegate/<task>`. The user's
    tree, and everything gitignored in it (databases, `.env`, local config), is out of the
    implementer's reach.
-2. **A ref guard.** A `reference-transaction` hook refuses every ref change (commit, stash, reset,
-   branch, checkout -b) while `DELEGATE_WORKER` is set, and `--no-verify` does not skip it. It guards
-   history, not files.
-3. **A check after every run.** `worktree.mjs check` confirms HEAD and the branch did not move and
-   lists every changed file against the task's allowed and protected paths.
+2. **A ref guard.** `worktree.mjs create` points the new worktree's own `core.hooksPath` at a
+   `reference-transaction` hook in the git dir. It refuses every ref change there (commit, stash,
+   reset, branch, checkout -b), whatever environment the implementer has, and `--no-verify` does not
+   skip it. The main checkout keeps its own hooks. It guards history, not files.
+3. **A check after every run.** `worktree.mjs check` confirms HEAD, the branch and the guard did not
+   change, and lists every changed file against the task's allowed and protected paths.
 
 Scripts live in this skill's `scripts/` folder (`<skill-dir>` below). They print JSON and need only Node.
+
+## First: does the project have specs?
+
+If the project has no `.spec-workflow/` folder, or no spec with a `tasks.md`, stop here and do
+nothing. Tell the user that spec-delegate works from spec-workflow tasks, so they can either create
+a spec with the spec-workflow MCP first, or delegate one-off work with a plain `*-delegate` skill
+(e.g. `cursor-delegate`, `agy-delegate`), which needs no specs. The scripts refuse the same way.
 
 ## Is the project set up?
 
@@ -40,8 +54,8 @@ Scripts live in this skill's `scripts/` folder (`<skill-dir>` below). They print
 node "<skill-dir>/scripts/init.mjs" --cd <repo>
 ```
 
-Ready means: `configFile` is `exists`, `hook.installed` is true, `agentsMd` is `has-rules`, and no
-note asks for a fix. If not, follow [references/setup.md](references/setup.md) first, then come back.
+Ready means `configFile` is `exists` and `notes` is empty. If not, follow
+[references/setup.md](references/setup.md) first, then come back.
 
 ## The loop (one task)
 
@@ -86,7 +100,8 @@ DELEGATE_WORKER=1 node "<implementer-skill-dir>/scripts/relay.mjs" \
   <relayFlags for this implementer from the config, if any>
 ```
 
-`DELEGATE_WORKER=1` arms the ref guard for everything the implementer runs. Add the config's
+`DELEGATE_WORKER=1` tells the skill scripts and the implementer rules that an implementer is running.
+The ref guard does not depend on it. Add the config's
 `relayFlags` for that implementer and nothing else that loosens permissions. Those flags are on record
 because the user approved them for this project. Run it in the background (in Claude Code:
 `run_in_background: true`) and wait for completion.
@@ -106,6 +121,7 @@ Keep this cheap: read the result before the code, and the code only where it mat
 
    A failed check is a stop: tell the user what it found. Do not land, and do not quietly repair it.
 3. Run every gate from the config yourself, inside the worktree, **without** `DELEGATE_WORKER`.
+   Gates never move refs, so the guard does not get in their way.
 4. Read `git -C <worktree> diff` against the brief's Success criteria and the design: did it do what
    was asked, nothing more and nothing less?
 
@@ -128,9 +144,16 @@ Nothing lands without an explicit accept.
 
 **Accept:**
 
-1. Commit in the worktree, without `DELEGATE_WORKER`, with a message in the project's style.
+1. Commit with a message in the project's style. Plain `git commit` in the worktree is refused by the
+   guard; this runs the project's own hooks instead:
+
+   ```bash
+   node "<skill-dir>/scripts/worktree.mjs" commit --cd <repo> --task <task> --message "<message>"
+   ```
+
 2. Bring it into the user's branch: `git -C <repo> merge --ff-only delegate/<task>`. If the user's
-   branch moved meanwhile, rebase the worktree branch onto it, re-run the gates, then fast-forward.
+   branch moved meanwhile, run `worktree.mjs rebase --cd <repo> --task <task> --onto <branch>`,
+   re-run the gates, then fast-forward.
 3. Mark the task `[x]` in the user's `tasks.md`.
 4. Call the spec-workflow `log-implementation` tool with the summary, files, statistics and
    **artifacts** (functions, classes, endpoints, components, integrations) taken from the landed diff.

@@ -5,28 +5,29 @@
  * Usage:
  *   node init.mjs [--cd <dir>]                     report what is set up, change nothing
  *   node init.mjs --verify [--cd <dir>]            try the config in a throwaway worktree
- *   node init.mjs --write [--verify] [--cd <dir>]  install the hook and implementer rules
+ *   node init.mjs --write [--verify] [--cd <dir>]  gitignore .spec-workflow/ if it is not yet
  *   node init.mjs --help
  *
- * The orchestrator writes `.delegate/spec-delegate.json` itself, following
+ * The orchestrator writes `.spec-workflow/delegate.json` itself, following
  * references/setup.md: working out a project's setup and gates takes judgment
  * no fixed table has. This script does the parts that must be exact.
  * --verify proves the setup works, leaves nothing git can see, and that the
  * gates pass on the base commit, before any implementer is measured against
- * them. --write installs the reference-transaction hook and adds the
- * implementer rules to AGENTS.md (created if missing). With --verify it writes
- * only when verification passes.
+ * them. --write adds `.spec-workflow/` to `.gitignore` when it is neither
+ * tracked nor ignored. Nothing else in the project changes: the guard hook
+ * lives in the git dir and `worktree.mjs create` wires it up per worktree.
  *
- * Prints JSON on stdout. Exit codes: 0 ok, 1 verification or hook install
- * failed, 2 usage or git error. Node built-ins only.
+ * Prints JSON on stdout. Exit codes: 0 ok, 1 verification failed, 2 usage or
+ * git error. Node built-ins only.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
   CONFIG_PATH,
+  SPEC_DIR,
   changedFiles,
   commonDir,
   copySnapshot,
@@ -34,31 +35,25 @@ import {
   git,
   gitOptional,
   gitRaw,
-  hookFile,
-  hookInstalled,
-  installHook,
   loadConfig,
   normalizeConfig,
   repoRoot,
+  requireSpecWorkflow,
   runCommands,
 } from "./worktree.mjs";
-
-const RULES_TEMPLATE = fileURLToPath(new URL("../templates/implementer-rules.md", import.meta.url));
-const RULES_HEADING = "## Rules for delegated implementers";
-const SPEC_DIR = ".spec-workflow";
 
 const HELP = `init.mjs — set up spec-delegate in a repository
 
 Usage:
   node init.mjs [--cd <dir>]                     report what is set up, change nothing
   node init.mjs --verify [--cd <dir>]            try the config in a throwaway worktree
-  node init.mjs --write [--verify] [--cd <dir>]  install the hook and implementer rules
+  node init.mjs --write [--verify] [--cd <dir>]  gitignore ${SPEC_DIR}/ if it is not yet
 
-Write ${CONFIG_PATH} first (references/setup.md).
+Needs ${SPEC_DIR}/: create a spec with the spec-workflow MCP first.
+Write ${CONFIG_PATH} before --verify (references/setup.md).
 --verify runs the setup commands and gates in a detached worktree of HEAD and
 fails when setup fails, setup leaves files git can see, or a gate fails.
---write installs the reference-transaction hook and adds the implementer rules
-to AGENTS.md. It never changes the config.
+--write adds ${SPEC_DIR}/ to .gitignore when it is neither tracked nor ignored.
 `;
 
 function fail(message) {
@@ -66,60 +61,49 @@ function fail(message) {
   process.exit(2);
 }
 
-const has = (root, path) => existsSync(join(root, path));
-const read = (root, path) => readFileSync(join(root, path), "utf8");
-
 function specWorkflowState(root) {
-  if (!has(root, SPEC_DIR)) return "missing";
   if (gitOptional(root, ["ls-files", "--", SPEC_DIR]) !== "") return "tracked";
   return gitRaw(root, ["check-ignore", "-q", "--", `${SPEC_DIR}/`]).status === 0 ? "ignored" : "untracked";
 }
 
-function agentsState(root) {
-  if (!has(root, "AGENTS.md")) return "missing";
-  return read(root, "AGENTS.md").includes(RULES_HEADING) ? "has-rules" : "needs-rules";
+function hasTasks(root) {
+  const specs = join(root, SPEC_DIR, "specs");
+  if (!existsSync(specs)) return false;
+  return readdirSync(specs, { withFileTypes: true }).some(
+    (entry) => entry.isDirectory() && existsSync(join(specs, entry.name, "tasks.md")),
+  );
+}
+
+/** The project's own hooks directory, when it lives in the working tree. */
+function projectHooksDir(root) {
+  const path = gitOptional(root, ["config", "core.hooksPath"]);
+  if (!path || path.startsWith("~")) return null;
+  const abs = resolve(root, path);
+  const rel = relative(root, abs);
+  if (rel === "" || rel.startsWith("..") || abs.startsWith(commonDir(root) + sep)) return null;
+  return `${rel.split(sep).join("/")}/`;
 }
 
 /** Reports how far the repository is set up; changes nothing. */
 export function inspect(root) {
+  requireSpecWorkflow(root);
   const notes = [];
-  const configFile = has(root, CONFIG_PATH) ? "exists" : "missing";
+  const configFile = existsSync(join(root, CONFIG_PATH)) ? "exists" : "missing";
   const config = configFile === "exists" ? loadConfig(root) : null;
   if (!config) notes.push(`No ${CONFIG_PATH} yet: write it by following references/setup.md.`);
 
-  // A hooks directory inside the working tree is tracked content to protect.
-  const hook = hookFile(root);
-  const hookRel = relative(root, dirname(hook));
-  const hooksDir =
-    !hookRel.startsWith("..") && !isAbsolute(hookRel) && !hook.startsWith(commonDir(root) + sep)
-      ? `${hookRel.split(sep).join("/")}/`
-      : null;
-  if (hooksDir && config && !config.protected.includes(hooksDir)) {
-    notes.push(`Add "${hooksDir}" to "protected": the hook lives in the working tree.`);
-  }
-
   const specWorkflow = specWorkflowState(root);
-  if (specWorkflow === "missing") {
-    notes.push(`No ${SPEC_DIR}/ yet: create a spec with the spec-workflow MCP before dispatching tasks.`);
-  } else if (specWorkflow === "untracked") {
-    notes.push(`${SPEC_DIR}/ is neither committed nor gitignored: do one, so worktrees can see the specs.`);
+  if (specWorkflow === "untracked") {
+    notes.push(`${SPEC_DIR}/ is neither tracked nor ignored: run with --write to add it to .gitignore.`);
   }
-  if (gitRaw(root, ["check-ignore", "-q", "--", CONFIG_PATH]).status === 0) {
-    notes.push(`${CONFIG_PATH} is gitignored: other clones will not get the config.`);
-  }
-  if (!has(root, "CLAUDE.md") && has(root, "AGENTS.md")) {
-    notes.push("No CLAUDE.md: if your orchestrator reads only CLAUDE.md, add one containing @AGENTS.md.");
-  }
+  if (!hasTasks(root)) notes.push(`No spec with a tasks.md under ${SPEC_DIR}/specs/ yet: nothing to delegate.`);
 
-  return {
-    configFile,
-    config,
-    hooksDir,
-    hook: hookInstalled(root),
-    agentsMd: agentsState(root),
-    specWorkflow,
-    notes,
-  };
+  // The project's own hooks are tracked content an implementer must not touch.
+  const hooksDir = projectHooksDir(root);
+  if (hooksDir && config && !config.protected.includes(hooksDir)) {
+    notes.push(`Add "${hooksDir}" to "protected": the project keeps its hooks there.`);
+  }
+  return { configFile, config, specWorkflow, hooksDir, notes };
 }
 
 /** Runs setup and gates in a detached worktree of HEAD, then deletes it. */
@@ -152,27 +136,13 @@ export function verify(root, raw) {
   }
 }
 
-/** Installs the hook and adds the implementer rules; never touches the config. */
+/** Adds .spec-workflow/ to .gitignore when git would otherwise see it. */
 export function write(root, state) {
-  const written = [];
-  const hook = installHook(root);
-  if (hook.changed) written.push(relative(root, hook.file));
-  const rules = readFileSync(RULES_TEMPLATE, "utf8");
-  if (state.agentsMd === "missing") {
-    writeFileSync(join(root, "AGENTS.md"), `# Agent rules\n\n${rules}`);
-    written.push("AGENTS.md");
-  } else if (state.agentsMd === "needs-rules") {
-    const current = read(root, "AGENTS.md");
-    appendFileSync(join(root, "AGENTS.md"), `${current.endsWith("\n") ? "" : "\n"}\n${rules}`);
-    written.push("AGENTS.md");
-  }
-  const notes = [];
-  if (hook.reachesWorktrees === "after-commit") {
-    notes.push(`Commit ${relative(root, hook.file)}: worktrees get the hook only from a commit.`);
-  } else if (hook.reachesWorktrees === "never") {
-    notes.push(`${relative(root, hook.file)} is gitignored, so worktrees never get it: point core.hooksPath elsewhere.`);
-  }
-  return { ok: hook.ok, written, hook, notes };
+  if (state.specWorkflow !== "untracked") return { ok: true, written: [] };
+  const file = join(root, ".gitignore");
+  const current = existsSync(file) ? readFileSync(file, "utf8") : "";
+  appendFileSync(file, `${current === "" || current.endsWith("\n") ? "" : "\n"}${SPEC_DIR}/\n`);
+  return { ok: true, written: [".gitignore"] };
 }
 
 function main(argv) {
@@ -200,18 +170,16 @@ function main(argv) {
   try {
     const root = repoRoot(resolve(values.cd ?? "."));
     const state = inspect(root);
-    if ((values.verify || values.write) && !state.config) {
-      throw new Error(`no ${CONFIG_PATH}: write it first (references/setup.md)`);
-    }
+    if (values.verify && !state.config) throw new Error(`no ${CONFIG_PATH}: write it first (references/setup.md)`);
     result = { ok: true, root, ...state };
     if (values.verify) {
-      result.verify = verify(root, JSON.parse(read(root, CONFIG_PATH)));
+      result.verify = verify(root, JSON.parse(readFileSync(join(root, CONFIG_PATH), "utf8")));
       result.ok = result.verify.ok;
     }
     if (values.write && result.ok) {
       if (process.env.DELEGATE_WORKER) throw new Error("implementers may not run `init --write`");
       result.write = write(root, state);
-      result.ok = result.write.ok;
+      Object.assign(result, inspect(root));
     }
   } catch (err) {
     fail(err.message);

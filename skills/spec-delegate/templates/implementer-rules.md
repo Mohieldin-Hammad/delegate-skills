@@ -1,8 +1,6 @@
-## Rules for delegated implementers
-
-These rules apply when you run as an implementer: an orchestrating agent sent
-you a brief, and `DELEGATE_WORKER` is set in your environment. Every other rule
-in this file still applies.
+These rules apply because you run as an implementer: an orchestrating agent sent
+you this brief, and `DELEGATE_WORKER` is set in your environment. The project's
+own agent rules (AGENTS.md, CLAUDE.md) still apply too.
 
 - Work only inside your worktree, and change only the files your brief names.
 - Never commit, push, stash, reset, rebase, merge, tag or switch branches. Leave

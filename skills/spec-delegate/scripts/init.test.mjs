@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -19,8 +19,10 @@ function git(cwd, ...args) {
   return r.stdout.trim();
 }
 
+const TASKS = { ".spec-workflow/specs/demo/tasks.md": "- [ ] 1. demo\n" };
+
 /** A committed repo at <tmp>/repo holding `files`; `untracked` stay uncommitted. */
-function makeRepo(files = {}, { hooksPath, untracked = {} } = {}) {
+function makeRepo(files = {}, { hooksPath, untracked = TASKS } = {}) {
   const base = mkdtempSync(join(tmpdir(), "spec-delegate-init-"));
   dirs.push(base);
   const repo = join(base, "repo");
@@ -48,63 +50,59 @@ function init(repo, ...args) {
 }
 
 const CONFIG = '{ "version": "spec-delegate.v1", "gates": ["true"] }\n';
+const IGNORED = { ".gitignore": ".spec-workflow/\n" };
 
-test("a bare repo is reported as not set up, and verify and write refuse", () => {
-  const repo = makeRepo();
-  const { json } = init(repo);
-  assert.equal(json.configFile, "missing");
-  assert.equal(json.config, null);
-  assert.ok(json.notes.some((n) => n.startsWith("No .delegate/spec-delegate.json yet")));
-  for (const flag of ["--verify", "--write"]) {
-    const r = init(repo, flag);
+test("a project without .spec-workflow/ is refused, pointing to the plain delegate skills", () => {
+  const repo = makeRepo({}, { untracked: {} });
+  for (const args of [[], ["--write"], ["--verify"]]) {
+    const r = init(repo, ...args);
     assert.equal(r.status, 2);
-    assert.match(r.stderr, /no \.delegate\/spec-delegate\.json: write it first/);
+    assert.match(r.stderr, /no \.spec-workflow\/ .*spec-workflow MCP first, or use a plain \*-delegate skill/);
   }
 });
 
-test("spec-workflow state: ignored, tracked, visible and missing", () => {
-  const spec = { ".spec-workflow/specs/a/tasks.md": "- [ ] 1\n" };
-  const ignored = init(makeRepo({ ".gitignore": ".spec-workflow/\n" }, { untracked: spec })).json;
-  assert.equal(ignored.specWorkflow, "ignored");
-  assert.equal(init(makeRepo(spec)).json.specWorkflow, "tracked");
-  const visible = init(makeRepo({}, { untracked: spec })).json;
-  assert.equal(visible.specWorkflow, "untracked");
-  assert.ok(visible.notes.some((n) => n.includes("neither committed nor gitignored")));
-  assert.ok(init(makeRepo()).json.notes.some((n) => n.startsWith("No .spec-workflow/")));
+test("a fresh project reports what is missing, and --verify needs the config", () => {
+  const { json } = init(makeRepo(IGNORED, { untracked: { ".spec-workflow/steering/x.md": "x\n" } }));
+  assert.equal(json.configFile, "missing");
+  assert.equal(json.specWorkflow, "ignored");
+  assert.ok(json.notes.some((n) => n.startsWith("No .spec-workflow/delegate.json yet")));
+  assert.ok(json.notes.some((n) => n.startsWith("No spec with a tasks.md")));
+  const r = init(makeRepo(IGNORED), "--verify");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /no \.spec-workflow\/delegate\.json: write it first/);
 });
 
-test("a hooks directory in the working tree must be in protected", () => {
-  const bare = init(makeRepo({ ".delegate/spec-delegate.json": CONFIG }, { hooksPath: ".githooks" })).json;
-  assert.equal(bare.hooksDir, ".githooks/");
-  assert.ok(bare.notes.includes('Add ".githooks/" to "protected": the hook lives in the working tree.'));
-  const ok = '{ "version": "spec-delegate.v1", "protected": [".githooks/"] }';
-  const done = init(makeRepo({ ".delegate/spec-delegate.json": ok }, { hooksPath: ".githooks" })).json;
-  assert.ok(!done.notes.some((n) => n.startsWith("Add ")));
-  assert.equal(init(makeRepo()).json.hooksDir, null, "the default hooks dir is in .git, not the tree");
+test("a set-up project reports no notes", () => {
+  const repo = makeRepo(IGNORED, { untracked: { ...TASKS, ".spec-workflow/delegate.json": CONFIG } });
+  const { json } = init(repo);
+  assert.equal(json.configFile, "exists");
+  assert.deepEqual(json.notes, []);
 });
 
-test("--write installs the hook and creates AGENTS.md, and a second run changes nothing", () => {
-  const repo = makeRepo({ ".delegate/spec-delegate.json": CONFIG });
+test("--write gitignores .spec-workflow/ once, and only when git would see it", () => {
+  const repo = makeRepo({ ".gitignore": ".venv/" });
+  assert.equal(init(repo).json.specWorkflow, "untracked");
   const first = init(repo, "--write");
   assert.equal(first.status, 0, first.stderr);
-  assert.deepEqual(first.json.write.written, [".git/hooks/reference-transaction", "AGENTS.md"]);
-  assert.match(readFileSync(join(repo, "AGENTS.md"), "utf8"), /## Rules for delegated implementers/);
-  const second = init(repo, "--write");
-  assert.deepEqual(second.json.write.written, []);
-  assert.equal(second.json.agentsMd, "has-rules");
+  assert.deepEqual(first.json.write.written, [".gitignore"]);
+  assert.equal(first.json.specWorkflow, "ignored");
+  assert.equal(readFileSync(join(repo, ".gitignore"), "utf8"), ".venv/\n.spec-workflow/\n");
+  assert.deepEqual(init(repo, "--write").json.write.written, []);
+
+  const tracked = makeRepo(TASKS, { untracked: {} });
+  assert.equal(init(tracked).json.specWorkflow, "tracked");
+  assert.deepEqual(init(tracked, "--write").json.write.written, [], "a committed spec folder stays as it is");
 });
 
-test("--write never changes the config and appends rules to an existing AGENTS.md", () => {
-  const repo = makeRepo({ ".delegate/spec-delegate.json": CONFIG, "AGENTS.md": "# Mine\n\n- my rule" });
-  init(repo, "--write");
-  assert.equal(readFileSync(join(repo, ".delegate/spec-delegate.json"), "utf8"), CONFIG);
-  const agents = readFileSync(join(repo, "AGENTS.md"), "utf8");
-  assert.ok(agents.startsWith("# Mine\n\n- my rule\n\n## Rules for delegated implementers"));
-});
-
-test("--write notes that a tracked hook must be committed", () => {
-  const r = init(makeRepo({ ".delegate/spec-delegate.json": CONFIG }, { hooksPath: ".githooks" }), "--write");
-  assert.ok(r.json.write.notes.some((n) => n.startsWith("Commit .githooks/reference-transaction")));
+test("the project's hooks directory in the working tree must be in protected", () => {
+  const configured = { ...TASKS, ".spec-workflow/delegate.json": CONFIG };
+  const bare = init(makeRepo(IGNORED, { hooksPath: ".githooks", untracked: configured })).json;
+  assert.equal(bare.hooksDir, ".githooks/");
+  assert.ok(bare.notes.includes('Add ".githooks/" to "protected": the project keeps its hooks there.'));
+  const ok = { ...TASKS, ".spec-workflow/delegate.json": '{ "version": "spec-delegate.v1", "protected": [".githooks/"] }' };
+  const done = init(makeRepo(IGNORED, { hooksPath: ".githooks", untracked: ok })).json;
+  assert.deepEqual(done.notes, []);
+  assert.equal(init(makeRepo(IGNORED)).json.hooksDir, null, "the default hooks dir is in .git, not the tree");
 });
 
 test("--verify runs setup and every gate in a throwaway worktree", () => {
@@ -113,19 +111,22 @@ test("--verify runs setup and every gate in a throwaway worktree", () => {
     setup: ["mkdir -p .venv && touch .venv/ok"],
     gates: ["test -f .venv/ok", "false", "true"],
   };
-  const repo = makeRepo({ ".gitignore": ".venv/\n", ".delegate/spec-delegate.json": JSON.stringify(config) });
+  const repo = makeRepo(
+    { ".gitignore": ".venv/\n.spec-workflow/\n" },
+    { untracked: { ...TASKS, ".spec-workflow/delegate.json": JSON.stringify(config) } },
+  );
   const r = init(repo, "--verify", "--write");
   assert.equal(r.status, 1);
   assert.deepEqual(r.json.verify.gates.map((g) => g.status), [0, 1, 0]);
   assert.deepEqual(r.json.verify.problems, ["gates fail on the base commit: false"]);
   assert.equal(r.json.write, undefined, "nothing is written when verification fails");
-  assert.equal(existsSync(join(repo, ".git/hooks/reference-transaction")), false);
   assert.equal(git(repo, "worktree", "list").split("\n").length, 1, "the probe worktree is gone");
 });
 
 test("--verify fails when setup leaves files git can see", () => {
   const config = { version: "spec-delegate.v1", setup: ["mkdir -p node_modules && touch node_modules/x"] };
-  const r = init(makeRepo({ ".delegate/spec-delegate.json": JSON.stringify(config) }), "--verify");
+  const repo = makeRepo(IGNORED, { untracked: { ...TASKS, ".spec-workflow/delegate.json": JSON.stringify(config) } });
+  const r = init(repo, "--verify");
   assert.equal(r.status, 1);
   assert.match(r.json.verify.problems[0], /setup leaves files git can see; gitignore them: node_modules\/x/);
 });
